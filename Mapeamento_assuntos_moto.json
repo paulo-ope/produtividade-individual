@@ -1,0 +1,68 @@
+{
+  "SUPORTE_MOTO": {
+    "assuntos": {
+      "Suporte Externo Fibra Urbana": [
+        "SUP: Atualização de configuração de equipamento ((Fibra))",
+        "SUP: Troca de Roteador/ONU (Fibra)",
+        "SUP: Problemas na rede interna do cliente (Fibra)",
+        "SUP: Alteração de Senha/Wifi (Fibra)",
+        "SUP: Fonte (Fibra)",
+        "SUP: Equipamentos travados (Fibra)",
+        "SUP: IPTV não licenciado (Fibra)",
+        "SUP: Equipamento resetado (Fibra)"
+      ],
+      "Remoção de Equipamentos": [
+        "Equipamentos: Removidos",
+        "Equipamentos: Não Removidos",
+        "Equipamentos: Parcialmente Removidos"
+      ],
+      "Sem Conexão Fibra Urbana": [
+        "SUP: Troca de Roteador/ONU (Fibra)",
+        "SUP: Atualização de configuração de equipamento ((Fibra))",
+        "SUP: Problemas na rede interna do cliente (Fibra)",
+        "SUP: Fonte (Fibra)",
+        "SUP: Equipamentos travados (Fibra)",
+        "SUP: Equipamento resetado (Fibra)",
+        "SUP: Cabo Lan invertido (Fibra)"
+      ],
+      "Remoção de Flashman": [
+        "Remoção de Flashman: Concluída",
+        "Remoção de Flashman: Não concluída / Trocado equipamento",
+        "Remoção de Flashman: Cliente ausente"
+      ],
+      "Troca de Equipamentos": [
+        "SUP: Troca de Roteador/ONU (Fibra)",
+        "Equipamento não Trocado sem Necessidade de Substituição"
+      ],
+      "Suporte Streaming/Apps": [
+        "Apps: Canais em funcionamento",
+        "Apps: TV / Aparelho não compatível",
+        "Apps: Max em funcionamento",
+        "Apps: Max + Canais em funcionamento"
+      ],
+      "Suporte Prioritário": [
+        "SUP: Troca de Roteador/ONU (Fibra)",
+        "SUP: Atualização de configuração de equipamento ((Fibra))"
+      ],
+      "Suporte Externo Fibra Rural": [
+        "SUP: Atualização de configuração de equipamento ((Fibra))",
+        "SUP: Troca de Roteador/ONU (Fibra)",
+        "SUP: Conector Danificado (Fibra)",
+        "SUP: IPTV não licenciado (Fibra)",
+        "SUP: Problemas na rede interna do cliente (Fibra)"
+      ],
+      "Ativação de Login Presencial": [
+        "Login ativado - Equipamento original mantido",
+        "Login ativado - Com substituição de equipamento"
+      ],
+      "Sem Conexão Fibra Rural": [
+        "SUP: Troca de Roteador/ONU (Fibra)",
+        "SUP: Fonte (Fibra)",
+        "SUP: Atualização de configuração de equipamento ((Fibra))"
+      ],
+      "Recuperação de Equipamento por Cobrança": [
+        "Equipamentos: Removidos"
+      ]
+    }
+  }
+}
