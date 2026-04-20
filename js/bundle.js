@@ -112,6 +112,7 @@ const state = {
   teamData:              {},
   rawExcelCache:         [],
   globalRawData:         [],
+  globalRawDataByMonth:  {},
   globalTechStats:       {},
   uploadMeta:            { hasContrato: false, hasCliente: false, hasLogin: false, availableMonths: [] },
   recurrenceSettings:    { diasAnalise: 30, periodoBuscaDias: 90, minimoOsParaReincidencia: 2 },
@@ -130,6 +131,8 @@ const state = {
   motoOportunidades:     [],
   chartDOW:              [0,1,2,3,4,5,6],
   currentFiltered:       [],
+  filterViewCache:       {},
+  currentFilterMeta:     { cityItems: {}, techItems: {}, cityTmaStats: {}, techTmaStats: {} },
   currentDayDetails:     [],
   currentDayDetailsDay:  null
 };
@@ -324,7 +327,7 @@ function switchTab(tab) {
   if (nt) nt.textContent = title;
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if(tab === 'recorrencia') renderRecorrenciaClientes();
-  if(tab === 'capacidades') renderCapacidades();
+  if(tab === 'capacidades') { renderCapacidades(); syncCapacidadesContext(); }
   if(tab === 'moto') renderMotoOportunidades();
 }
 
@@ -569,11 +572,10 @@ function renderTeamTable() {
     'RURAL':'#92400E','FAZ TUDO':'#9333EA','AUXILIAR':'#475569'
   };
   const techStats = {};
-  if(state.globalRawData.length) {
-    state.globalRawData.filter(i=>i.monthStr===state.activeMonthYear).forEach(i=>{
-      techStats[i.techKey]=(techStats[i.techKey]||0)+1;
-    });
-  }
+  const monthRows = state.globalRawDataByMonth?.[state.activeMonthYear] || [];
+  monthRows.forEach(i=>{
+    techStats[i.techKey]=(techStats[i.techKey]||0)+1;
+  });
   container.innerHTML = Object.keys(grp).sort().map(base => {
     const members = grp[base].sort((a,b) => a.originalName.localeCompare(b.originalName));
     const tipoCount = {};
@@ -687,17 +689,40 @@ function renderAdvancedDailyChart() {
   });
 
   const capMedianaArr = [];
+  const capBoaArr = [];
+  const capExcelenteArr = [];
   for(let d=1; d<=dIM; d++) {
-     let capDia = 0;
+     let capMedDia = 0;
+     let capBoaDia = 0;
+     let capExcDia = 0;
      const dow = new Date(year, month, d).getDay();
+     let equipes1236 = 0;
+     let meta1236 = 0;
      activeTechKeys.forEach(tk => {
         const td = state.teamData[tk];
         if(!td || td.tipo === 'AUXILIAR') return;
         const baseMeta = state.appSettings.metasDiarias[td.tipo] || 5;
+        if(td.tipo === 'TECNICO 12/36H') {
+          equipes1236++;
+          meta1236 = baseMeta;
+          return;
+        }
         const metaDia = getMetaForDay(baseMeta, dow, td.tipo);
-        if(metaDia > 0) capDia += Math.max(0, metaDia - 2);
+        if(metaDia > 0) {
+          capExcDia += metaDia;
+          capBoaDia += Math.max(0, metaDia - 1);
+          capMedDia += Math.max(0, metaDia - 2);
+        }
      });
-     capMedianaArr.push(capDia);
+     if(equipes1236 > 0) {
+       const equipesAtivas1236 = Math.round(equipes1236 / 2);
+       capExcDia += equipesAtivas1236 * meta1236;
+       capBoaDia += equipesAtivas1236 * Math.max(0, meta1236 - 1);
+       capMedDia += equipesAtivas1236 * Math.max(0, meta1236 - 2);
+     }
+     capMedianaArr.push(capMedDia);
+     capBoaArr.push(capBoaDia);
+     capExcelenteArr.push(capExcDia);
   }
 
   const labels = [];
@@ -716,19 +741,21 @@ function renderAdvancedDailyChart() {
 
      labels.push([String(d), DN[dow]]);
      const v = dayMap[d] || 0;
-     const c = capMedianaArr[d-1];
+     const cMed = capMedianaArr[d-1];
+     const cBoa = capBoaArr[d-1];
+     const cExc = capExcelenteArr[d-1];
 
      dataOs.push(v);
-     dataCap.push(c);
+     dataCap.push(cMed);
      totalOsView += v;
-     sumCap += c;
+     sumCap += cMed;
      if(v > peakOs) { peakOs = v; peakDay = d; peakDow = DN[dow]; }
 
      let bgCol;
      if (v === 0) bgCol = dark ? 'rgba(48,54,61,.4)' : 'rgba(228,232,239,.6)';
-     else if (v >= c + 2) bgCol = 'rgba(29,111,232,.9)';
-     else if (v >= c + 1) bgCol = 'rgba(22,163,74,.85)';
-     else if (v >= c) bgCol = 'rgba(202,138,4,.85)';
+     else if (v >= cExc) bgCol = 'rgba(29,111,232,.9)';
+     else if (v >= cBoa) bgCol = 'rgba(22,163,74,.85)';
+     else if (v >= cMed) bgCol = 'rgba(202,138,4,.85)';
      else bgCol = 'rgba(220,38,38,.85)';
      colors.push(bgCol);
   }
@@ -822,28 +849,35 @@ function buildRanking(filtered) {
 
 function updateDashboardStats(filtered) {
   state.currentFiltered = filtered;
+  const filterMeta = state.currentFilterMeta || {};
   const grid = document.getElementById('kpiGrid'); if (grid) grid.style.display = 'grid';
   const tot = filtered.length;
   document.getElementById('dashTotalOs').textContent = tot || '—';
   if (!tot) { ['dashActiveTechs','dashAvgTech','dashTopBase','dashCriticalBase'].forEach(id=>document.getElementById(id).textContent='—'); return; }
-  const ts = new Set(filtered.map(i=>i.techKey));
-  document.getElementById('dashActiveTechs').textContent = ts.size;
-  document.getElementById('dashAvgTech').textContent = Math.round(tot/ts.size);
+  const techTotals = filterMeta.techTotals || {};
+  const techKeys = Object.keys(techTotals);
+  const activeTechCount = techKeys.length;
+  document.getElementById('dashActiveTechs').textContent = activeTechCount;
+  document.getElementById('dashAvgTech').textContent = Math.round(tot / Math.max(activeTechCount, 1));
   const [ys,ms] = state.activeMonthYear.split('-');
   const dIM = new Date(parseInt(ys), parseInt(ms), 0).getDate();
-  const dayMap = {}; filtered.forEach(i=>{ dayMap[i.day]=(dayMap[i.day]||0)+1; });
+  const dayMap = filterMeta.dayMap || {};
   const dailyArr = Array.from({length:dIM},(_,i)=>dayMap[i+1]||0);
   setTimeout(()=>{
     drawSparkline('spark0', dailyArr, '#E07B1F');
-    const tArr = Array.from(ts).map(tk=>{let c=0;filtered.forEach(i=>{if(i.techKey===tk)c++;});return c;}).sort((a,b)=>a-b);
+    const tArr = Object.values(techTotals).sort((a,b)=>a-b);
     drawSparkline('spark1', tArr, '#1D6FE8');
-    drawSparkline('spark2', dailyArr.map(v=>v>0?Math.round(v/ts.size):0), '#8B5CF6');
+    drawSparkline('spark2', dailyArr.map(v=>v>0?Math.round(v/Math.max(activeTechCount, 1)):0), '#8B5CF6');
     renderAdvancedDailyChart();
     buildRanking(filtered);
   }, 100);
-  const bs = {};
-  filtered.forEach(i=>{ if(!bs[i.cidade])bs[i.cidade]={total:0,techs:new Set()}; bs[i.cidade].total++; bs[i.cidade].techs.add(i.techKey); });
-  const arr = Object.keys(bs).map(b=>({nome:b,media:bs[b].total/bs[b].techs.size})).sort((a,b)=>b.media-a.media);
+  const cityMap = filterMeta.cityMap || {};
+  const arr = Object.keys(cityMap).map(b => {
+    const techs = cityMap[b];
+    const totals = Object.values(techs);
+    const totalOs = totals.reduce((sum, tech) => sum + tech.total, 0);
+    return { nome: b, media: totalOs / Math.max(totals.length, 1) };
+  }).sort((a,b)=>b.media-a.media);
   if (arr.length) {
     document.getElementById('dashTopBase').textContent = arr[0].nome;
     const tb = document.getElementById('dashTopBadge');
@@ -892,6 +926,134 @@ function tC(v, ce, cb, cm) {
   if (v>=cb) return 'tb';
   if (v>=cm) return 'ty';
   return 'tr';
+}
+
+function formatMinutesCompact(minutes) {
+  if (minutes == null || isNaN(minutes)) return '--';
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = Math.round(minutes % 60);
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+function getOsTmaMinutes(os) {
+  const dIni = toDateTime(os?.dtInicio);
+  const dFin = toDateTime(os?.dtFinal);
+  if (!dIni || !dFin || dFin < dIni) return null;
+  const tmaMin = (dFin - dIni) / 60000;
+  return tmaMin < 1440 ? tmaMin : null;
+}
+
+function getTmaStats(items) {
+  const valid = (items || []).map(getOsTmaMinutes).filter(v => v != null && !isNaN(v));
+  if (!valid.length) {
+    return {
+      count: 0,
+      totalMinutes: 0,
+      avgMinutes: null,
+      medianMinutes: null,
+      maxMinutes: null,
+      above120Count: 0,
+      above120Pct: 0
+    };
+  }
+
+  const sorted = [...valid].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const totalMinutes = valid.reduce((sum, value) => sum + value, 0);
+  const medianMinutes = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const above120Count = valid.filter(v => v >= 120).length;
+
+  return {
+    count: valid.length,
+    totalMinutes,
+    avgMinutes: totalMinutes / valid.length,
+    medianMinutes,
+    maxMinutes: sorted[sorted.length - 1],
+    above120Count,
+    above120Pct: Math.round((above120Count / valid.length) * 100)
+  };
+}
+
+function getTmaAlertThresholdMinutes(items, techKey) {
+  const supportTypes = new Set(['SUPORTE MOTO', 'SUPORTE CARRO']);
+  const explicitType = techKey ? state.teamData[techKey]?.tipo : null;
+  if (supportTypes.has(explicitType)) return 60;
+
+  const types = [...new Set((items || []).map(item => item?.tipo).filter(Boolean))];
+  return types.length === 1 && supportTypes.has(types[0]) ? 60 : 120;
+}
+
+function getFilterViewCacheKey(monthValue, cityValue, typeValue) {
+  return `${monthValue || ''}__${cityValue || 'ALL'}__${typeValue || 'ALL'}`;
+}
+
+function buildCurrentFilterMeta(filtered) {
+  const cityItems = {};
+  const techItems = {};
+  const cityMap = {};
+  const techTotals = {};
+  const auxTotals = {};
+  const techDays = {};
+  const citySummary = {};
+  const dayMap = {};
+  const activeTechKeys = new Set();
+
+  (filtered || []).forEach(item => {
+    if (!cityItems[item.cidade]) cityItems[item.cidade] = [];
+    cityItems[item.cidade].push(item);
+
+    const techKey = `${item.cidade}::${item.techKey}`;
+    if (!techItems[techKey]) techItems[techKey] = [];
+    techItems[techKey].push(item);
+
+    if (!cityMap[item.cidade]) cityMap[item.cidade] = {};
+    if (!cityMap[item.cidade][item.techKey]) cityMap[item.cidade][item.techKey] = { dias: {}, total: 0, tipo: item.tipo };
+    cityMap[item.cidade][item.techKey].dias[item.day] = (cityMap[item.cidade][item.techKey].dias[item.day] || 0) + 1;
+    cityMap[item.cidade][item.techKey].total++;
+    if (state.teamData[item.techKey]?.tipo) cityMap[item.cidade][item.techKey].tipo = state.teamData[item.techKey].tipo;
+
+    const resolvedType = state.teamData[item.techKey]?.tipo || item.tipo || 'INSTALAÇÃO CIDADE';
+    if (resolvedType === 'AUXILIAR') auxTotals[item.techKey] = (auxTotals[item.techKey] || 0) + 1;
+    else techTotals[item.techKey] = (techTotals[item.techKey] || 0) + 1;
+
+    if (!techDays[item.techKey]) techDays[item.techKey] = new Set();
+    techDays[item.techKey].add(item.day);
+
+    if (!citySummary[item.cidade]) citySummary[item.cidade] = { total: 0, techs: new Set() };
+    citySummary[item.cidade].total++;
+    citySummary[item.cidade].techs.add(item.techKey);
+
+    dayMap[item.day] = (dayMap[item.day] || 0) + 1;
+    activeTechKeys.add(item.techKey);
+  });
+
+  const cityTmaStats = {};
+  Object.keys(cityItems).forEach(cidade => {
+    cityTmaStats[cidade] = getTmaStats(cityItems[cidade]);
+  });
+
+  const techTmaStats = {};
+  Object.keys(techItems).forEach(key => {
+    techTmaStats[key] = getTmaStats(techItems[key]);
+  });
+
+  state.currentFiltered = filtered || [];
+  const meta = {
+    cityItems,
+    techItems,
+    cityTmaStats,
+    techTmaStats,
+    cityMap,
+    techTotals,
+    auxTotals,
+    techDays,
+    citySummary,
+    dayMap,
+    activeTechKeys
+  };
+  state.currentFilterMeta = meta;
+  return meta;
 }
 
 function buildCityMap(filtered) {
@@ -977,6 +1139,7 @@ function renderTechRow(tk, data, dIM, fdw, cidade) {
   const badgeColor = tipoColors[data.tipo] || '#64748B';
   const cityStr = cidade ? `,'${cidade.replace(/'/g, "\\\\'")}'` : ",''";
   const tkStr = tk ? `,'${tk.replace(/'/g, "\\\\'")}'` : '';
+  const tmaStats = state.currentFilterMeta?.techTmaStats?.[`${cidade}::${tk}`] || getTmaStats([]);
   let row=`<tr class="mat-row${isAux?' aux-row':''}"><td class="cn">
     <div class="cn-inner">
       <div class="cn-avatar" style="background:rgba(255,255,255,0.06);color:#7A92AA;border:1px solid rgba(255,255,255,0.10);">${initials}</div>
@@ -1015,8 +1178,15 @@ function renderTechRow(tk, data, dIM, fdw, cidade) {
   return row;
 }
 
-function generateMatrix(filtered) {
+function generateMatrix(filtered, cacheKey) {
   const wrapper = document.getElementById('matrixWrapper');
+  const cachedView = cacheKey ? state.filterViewCache[cacheKey] : null;
+  if (cachedView?.matrixHtml) {
+    wrapper.innerHTML = cachedView.matrixHtml;
+    if(isMobile())wrapper.classList.add('compact');
+    setTimeout(applyCapVisibility, 0);
+    return;
+  }
   if (!filtered.length) {
     wrapper.innerHTML=`<div style="padding:40px;text-align:center;font-family:var(--mono);font-size:11px;color:var(--text-3);background:var(--card-bg);border:1px solid var(--card-border);border-radius:var(--r-xl);">Nenhum dado para os filtros selecionados.</div>`;
     return;
@@ -1024,7 +1194,7 @@ function generateMatrix(filtered) {
   const [ys,ms]=state.activeMonthYear.split('-');
   const year=parseInt(ys), mIdx=parseInt(ms)-1;
   const dIM=new Date(year,mIdx+1,0).getDate(), fdw=new Date(year,mIdx,1).getDay();
-  const cityMap=buildCityMap(filtered);
+  const cityMap=state.currentFilterMeta?.cityMap || buildCityMap(filtered);
   let html='';
   Object.keys(cityMap).sort().forEach(cidade=>{
     if(state.selectedCityTab!=='ALL'&&cidade!==state.selectedCityTab)return;
@@ -1062,7 +1232,7 @@ function generateMatrix(filtered) {
         <div class="mat-hdr-kpis">
           <div class="mat-kpi"><span class="mat-kpi-icon">👷</span><div><div class="mat-kpi-val">${sorted.length}</div><div class="mat-kpi-lbl">Técnicos</div></div></div>
           <div class="mat-kpi-sep"></div>
-          <div class="mat-kpi"><span class="mat-kpi-icon">📋</span><div><div class="mat-kpi-val">${totOS}</div><div class="mat-kpi-lbl">O.S. Entregues</div></div></div>
+          <div class="mat-kpi" style="cursor:pointer;" onclick="App.showDayDetails(null,'${cidade.replace(/'/g, "\\'")}')" title="Ver detalhamento mensal da regional ${cidade}"><span class="mat-kpi-icon">📋</span><div><div class="mat-kpi-val">${totOS}</div><div class="mat-kpi-lbl">O.S. Entregues</div></div></div>
           <div class="mat-kpi-sep"></div>
           <div class="mat-kpi mat-kpi-cap">
             <span class="mat-kpi-icon">🎯</span>
@@ -1097,6 +1267,10 @@ function generateMatrix(filtered) {
     </div>`; 
   });
   wrapper.innerHTML=html;
+  if (cacheKey) {
+    if (!state.filterViewCache[cacheKey]) state.filterViewCache[cacheKey] = {};
+    state.filterViewCache[cacheKey].matrixHtml = html;
+  }
   if(isMobile())wrapper.classList.add('compact');
   setTimeout(applyCapVisibility, 0);
 }
@@ -1112,13 +1286,8 @@ function renderCapacidades() {
     return;
   }
   const fc  = state.selectedCityTab;
-  const ft  = document.getElementById('filterType')?.value||'ALL';
-  const filtered = state.globalRawData.filter(i =>
-    i.monthStr===state.activeMonthYear &&
-    (fc==='ALL'||i.cidade===fc) &&
-    (ft==='ALL'||i.tipo===ft)
-  );
-  const cityMap = buildCityMap(filtered);
+  const filtered = state.currentFiltered || [];
+  const cityMap = state.currentFilterMeta?.cityMap || buildCityMap(filtered);
 
   function capColors(p) {
     if(p>=100) return {bg:'rgba(96,165,250,.15)',border:'#60A5FA',text:'#60A5FA',badge:'#1E3A8A'};
@@ -1278,9 +1447,12 @@ function renderCapacidades() {
       <td style="padding:8px 10px;text-align:center;">${pctBadge(r.pMed)}</td>
     </tr>`).join('');
 
+  const totalLabel = fc === 'ALL' ? 'TOTAL GERAL' : `TOTAL ${fc}`;
+  const mainTitle = fc === 'ALL' ? 'Capacidade por Filial e Tipo de Equipe' : `Capacidade da Regional ${fc}`;
+  const sideTitle = fc === 'ALL' ? 'Resumo Geral' : `Resumo da Regional ${fc}`;
   const totalRow = `
     <tr class="cap-row cap-total">
-      <td class="cap-cidade">TOTAL GERAL</td>
+      <td class="cap-cidade">${totalLabel}</td>
       <td class="cap-num">${totTechs}</td>
       <td class="cap-num" style="color:#93C5FD;font-weight:800;">${totOS}</td>
       <td class="cap-num" style="color:#60A5FA;font-weight:700;">${totExc}</td>
@@ -1483,6 +1655,91 @@ function exportToExcel() {
    ═══════════════════════════════════════════════════════════ */
 function buildOperationalAnalysis(filtered) {
   if (!filtered.length) return;
+  const meta = state.currentFilterMeta || {};
+  const techTotalsFast = meta.techTotals || {};
+  const techDiasFast = meta.techDays || {};
+  const auxTotalsFast = meta.auxTotals || {};
+  const sortedFast=Object.entries(techTotalsFast).sort((a,b)=>b[1]-a[1]);
+  if(sortedFast.length){
+    const totalOS=filtered.length, totalTechs=sortedFast.length, avgOS=totalOS/totalTechs;
+    const best=sortedFast[0], worst=sortedFast[sortedFast.length-1];
+    const bestNome=state.teamData[best[0]]?.originalName||best[0];
+    const worstNome=state.teamData[worst[0]]?.originalName||worst[0];
+    const [ys,ms]=state.activeMonthYear.split('-');
+    const dIM=new Date(parseInt(ys),parseInt(ms),0).getDate();
+    const dayMapFast=meta.dayMap || {};
+    const dailyArr=Array.from({length:dIM},(_,i)=>dayMapFast[i+1]||0);
+    const diasUteisProd=dailyArr.filter((v,i)=>{const dw=new Date(parseInt(ys),parseInt(ms)-1,i+1).getDay();return dw>=1&&dw<=5&&v>0;});
+    const diasSabProd=dailyArr.filter((v,i)=>{const dw=new Date(parseInt(ys),parseInt(ms)-1,i+1).getDay();return dw===6&&v>0;});
+    const workDays=dailyArr.filter(v=>v>0);
+    const nonSunArr=dailyArr.filter((v,i)=>{const dw=new Date(parseInt(ys),parseInt(ms)-1,i+1).getDay();return dw!==0;});
+    const nonSunMin=Math.min(...nonSunArr.filter(v=>v>0));
+    const weakIdx=dailyArr.findIndex((v,i)=>{const dw=new Date(parseInt(ys),parseInt(ms)-1,i+1).getDay();return v===nonSunMin&&dw!==0;});
+    const weakDay=weakIdx>=0?`Dia ${weakIdx+1} (${DN[new Date(parseInt(ys),parseInt(ms)-1,weakIdx+1).getDay()]})`:'—';
+    const weakVal=weakIdx>=0?dailyArr[weakIdx]:0;
+    const abovePct=sortedFast.filter(([k,v])=>{
+      const tipo=state.teamData[k]?.tipo||'INSTALAÇÃO CIDADE';
+      if(tipo==='AUXILIAR')return false;
+      const m=state.appSettings.metasDiarias[tipo]||5;
+      const bm=tipo==='TECNICO 12/36H'?15:24;
+      return v/(m*bm)>=0.8;
+    });
+    const effPct=totalTechs>0?Math.round(abovePct.length/totalTechs*100):0;
+    const bestMeta=state.appSettings.metasDiarias[state.teamData[best[0]]?.tipo||'INSTALAÇÃO CIDADE']||5;
+    const bestBm=state.teamData[best[0]]?.tipo==='TECNICO 12/36H'?15:24;
+    const bestCap=Math.round(best[1]/(bestMeta*bestBm)*100);
+    document.getElementById('aEfic').textContent=effPct+'%';
+    document.getElementById('aEficSub').textContent=`${abovePct.length} de ${totalTechs} técnicos acima de 80% da capacidade`;
+    document.getElementById('aBest').textContent=bestNome;
+    document.getElementById('aBestSub').textContent=`${best[1]} OS · ${bestCap}% da cap.`;
+    document.getElementById('aWorst').textContent=worstNome;
+    document.getElementById('aWorstSub').textContent=`${worst[1]} OS · ${Math.round(worst[1]/avgOS*100)}% da média geral`;
+    document.getElementById('aWeakDay').textContent=weakDay;
+    document.getElementById('aWeakDaySub').textContent=`${weakVal} OS · dia de menor produção`;
+    const topList=sortedFast.slice(0,5).map(([k,v])=>{
+      const tipo=state.teamData[k]?.tipo||'INSTALAÇÃO CIDADE';
+      const m=state.appSettings.metasDiarias[tipo]||5;
+      const bm=tipo==='TECNICO 12/36H'?15:24;
+      const cap=Math.round(v/(m*bm)*100);
+      const tipoLabel=TEAM_TYPES[tipo]||tipo;
+      return`<div class="obs-item"><div class="obs-dot g"></div><span><b>${state.teamData[k]?.originalName||k}</b> <span class="obs-type-tag">${tipoLabel}</span> — ${v} OS <span class="obs-cap-tag ${cap>=100?'cap-ex':cap>=80?'cap-bom':''}">${cap}%</span></span></div>`;
+    }).join('');
+    document.getElementById('obsPositivos').innerHTML=topList||'<div class="empty" style="padding:12px;">Sem dados.</div>';
+    const botList=sortedFast.filter(([k,v])=>v<avgOS*0.6).slice(0,5).map(([k,v])=>{
+      const diff=Math.round((1-v/avgOS)*100);
+      const tipo=state.teamData[k]?.tipo||'INSTALAÇÃO CIDADE';
+      const tipoLabel=TEAM_TYPES[tipo]||tipo;
+      const dias=techDiasFast[k]?.size||0;
+      return`<div class="obs-item"><div class="obs-dot r"></div><span><b>${state.teamData[k]?.originalName||k}</b> <span class="obs-type-tag">${tipoLabel}</span> — ${v} OS em ${dias} dias (${diff}% abaixo da média)</span></div>`;
+    }).join('');
+    document.getElementById('obsAtencao').innerHTML=botList||'<div class="obs-item"><div class="obs-dot g"></div><span>Todos os técnicos acima de 60% da média!</span></div>';
+    const auxList=Object.entries(auxTotalsFast).sort((a,b)=>b[1]-a[1]);
+    const diasComOS=workDays.length;
+    const diasUteisTotal=dailyArr.filter((_,i)=>{const dw=new Date(parseInt(ys),parseInt(ms)-1,i+1).getDay();return dw!==0&&dw!==6;}).length;
+    const mediaUteis=diasUteisProd.length>0?Math.round(diasUteisProd.reduce((a,b)=>a+b,0)/diasUteisProd.length):0;
+    const mediaSab=diasSabProd.length>0?Math.round(diasSabProd.reduce((a,b)=>a+b,0)/diasSabProd.length):0;
+    const obs=[];
+    obs.push(`Presença em <b>${Math.round(diasComOS/diasUteisTotal*100)}%</b> dos dias úteis (${diasUteisTotal} dias)`);
+    obs.push(`Média de <b>${mediaUteis} OS/dia</b> em dias úteis${mediaSab>0?' · <b>'+mediaSab+' OS/dia</b> aos sábados':''}`);
+    if(sortedFast.length>1) obs.push(`Amplitude: <b>${best[1]-worst[1]} OS</b> entre o melhor e o pior técnico`);
+    if(auxList.length>0) obs.push(`<b>${auxList.length}</b> auxiliar(es) com OS finalizada(s) este período`);
+    const diasSemOS=dailyArr.filter((v,i)=>{const dw=new Date(parseInt(ys),parseInt(ms)-1,i+1).getDay();return v===0&&dw>=1&&dw<=5;}).length;
+    if(diasSemOS>0) obs.push(`<b>${diasSemOS}</b> dias úteis sem nenhuma OS registrada`);
+    document.getElementById('obsRapidas').innerHTML=obs.map(o=>`<div class="obs-item"><div class="obs-dot y"></div><span>${o}</span></div>`).join('');
+    const sug=[];
+    if(worst[1]<avgOS*0.5) sug.push(`Verificar situação de <b>${worstNome}</b> — produção abaixo de 50% da média da equipe`);
+    if(effPct<40) sug.push(`Apenas <b>${effPct}%</b> da equipe atingiu 80%+ da capacidade — revisar distribuição de OS`);
+    else if(effPct<60) sug.push(`<b>${100-effPct}%</b> da equipe abaixo de 80% — identificar gargalos de atendimento`);
+    if(weakVal<avgOS*0.3&&weakIdx>=0) sug.push(`Investigar a baixa produção no <b>${weakDay}</b> — possível falta de escala ou OS`);
+    if(diasSemOS>2) sug.push(`Revisar escalonamento — <b>${diasSemOS} dias úteis</b> sem OS registrada`);
+    const cidadesArr=Object.entries(meta.citySummary || {}).map(([c,d])=>({nome:c,media:d.total/d.techs.size}));
+    if(cidadesArr.length>1){cidadesArr.sort((a,b)=>b.media-a.media);const diff=Math.round(cidadesArr[0].media-cidadesArr[cidadesArr.length-1].media);if(diff>20)sug.push(`Desbalanceamento entre polos: <b>${cidadesArr[0].nome}</b> produz ${diff} OS/técnico a mais que <b>${cidadesArr[cidadesArr.length-1].nome}</b>`);}
+    if(!sug.length) sug.push('Operação estável — manter monitoramento semanal de produtividade');
+    document.getElementById('obsSugestoes').innerHTML=sug.slice(0,4).map(s=>`<div class="obs-item"><div class="obs-dot b"></div><span>${s}</span></div>`).join('');
+    document.getElementById('badgeAnalise')?.classList.remove('hidden');
+    document.getElementById('mobBadgeAnalise')?.classList.remove('hidden');
+    return;
+  }
   const techTotals={}, techDias={}, auxTotals={};
 
   filtered.forEach(i=>{
@@ -1786,8 +2043,14 @@ function diffDays(a, b) {
   return Math.round((bTime - aTime) / 86400000);
 }
 
+function getRecurrenceSourceRows() {
+  if (state.rawExcelCache && state.rawExcelCache.length) return state.rawExcelCache;
+  if (state.globalRawData && state.globalRawData.length) return state.globalRawData;
+  return [];
+}
+
 function getRecurrenceReferenceEndDate() {
-  const rowsInMonth = (state.rawExcelCache || []).filter(os => os.monthStr === state.activeMonthYear);
+  const rowsInMonth = getRecurrenceSourceRows().filter(os => os.monthStr === state.activeMonthYear);
   const datedRows = rowsInMonth
     .map(os => toDateTime(os.dateTimeStr || os.dateStr))
     .filter(Boolean)
@@ -1803,7 +2066,12 @@ function getRecurrenceReferenceEndDate() {
 function getSelectedRecurrenceTechnicians() {
   const byKey = new Set(Object.keys(state.teamData));
   const byOriginal = new Set(Object.values(state.teamData).map(t => normalizeText(t.originalName)));
-  return { byKey, byOriginal, list: Object.values(state.teamData).map(t => t.originalName).sort() };
+  return {
+    byKey,
+    byOriginal,
+    hasTeamFilter: byKey.size > 0 || byOriginal.size > 0,
+    list: Object.values(state.teamData).map(t => t.originalName).sort()
+  };
 }
 
 function getRecurrenceIdentityStrict(os) {
@@ -1847,6 +2115,46 @@ function getClassificationLabel(classificacao) {
   return labels[classificacao] || classificacao;
 }
 
+function getExcludedRecurrenceSubjects() {
+  return [
+    "Instalação Fibra Urbana",
+    "Instalação Fibra Rural",
+    "Instalação Rádio",
+    "Retorno de Instalação Fibra Urbana",
+    "Retorno de Instalação Fibra Rural",
+    "Retorno de Instalação Rádio",
+    "Alteração de Endereço Fibra Urbana",
+    "Alteração de Endereço Fibra Rural",
+    "Alteração de Endereço Rádio",
+    "Retorno de Alteração de Endereço Fibra Urbana",
+    "Retorno de Alteração de Endereço Fibra Rural",
+    "Retorno de Alteração de Endereço Rádio",
+    "Alteração da Tecnologia para Fibra",
+    "Alteração da Tecnologia para Rádio",
+    "Retorno de Alteração de Tecnologia para Fibra",
+    "Retorno de Alteração de Tecnologia Rádio para Fibra",
+    "Retorno de Alteração de Tecnologia Fibra para Rádio",
+    "Remoção de Flashman",
+    "Manutenção Preventiva Operacional",
+    "Viabilidade"
+  ].map(normalizeText);
+}
+
+function isExcludedRecurrenceSubject(subject, excludedSubjects) {
+  const assuntoNorm = normalizeText(subject || '');
+  return excludedSubjects.some(ex => assuntoNorm.includes(ex));
+}
+
+function isExcludedRecurrenceDiagnosis(diagnosis) {
+  const diagnosticoNorm = normalizeText(diagnosis || '');
+  if (!diagnosticoNorm) return false;
+  return diagnosticoNorm.includes('INSTALACAO') || diagnosticoNorm.includes('PASSAGEM DE CABO');
+}
+
+function isViabilitySubject(subject) {
+  return normalizeText(subject || '').includes('VIABILIDADE');
+}
+
 function buildRecurrenceRecommendations(analysis) {
   const recs = new Set();
   const assuntos = analysis.reincidentes.map(item => normalizeText(item.assunto_principal));
@@ -1871,16 +2179,11 @@ function buildRecurrenceRecommendations(analysis) {
 function buildRecurrenceAnalysisData() {
   const settings = state.recurrenceSettings || { diasAnalise: 30, periodoBuscaDias: 90, minimoOsParaReincidencia: 2 };
   const selectedTechs = getSelectedRecurrenceTechnicians();
+  const sourceRows = getRecurrenceSourceRows();
   if (state.uploadMeta && state.uploadMeta.hasStatus === false) {
     return {
       success: false,
       message: 'A planilha carregada nao possui coluna de status. A analise exige Status = Finalizada.'
-    };
-  }
-  if (!selectedTechs.byKey.size && !selectedTechs.byOriginal.size) {
-    return {
-      success: false,
-      message: 'Cadastre ao menos um colaborador na aba Equipes para usar como filtro da analise.'
     };
   }
 
@@ -1912,14 +2215,14 @@ function buildRecurrenceAnalysisData() {
     diasAnalise: settings.diasAnalise,
     periodoBuscaDias: settings.periodoBuscaDias,
     minimoOsParaReincidencia: settings.minimoOsParaReincidencia,
-    rawCount: state.rawExcelCache.length,
+    rawCount: sourceRows.length,
     teamCount: Object.keys(state.teamData).length
   });
   if (state.recurrenceAnalysis && state.recurrenceAnalysisKey === cacheKey) {
     return state.recurrenceAnalysis;
   }
 
-  const allRows = (state.rawExcelCache || []).map(os => ({
+  const allRows = sourceRows.map(os => ({
     ...os,
     _date: toDateTime(os.dateTimeStr || os.dateStr),
     _techKey: limparNome(os.nomeOriginal || os.nome || '')
@@ -1932,9 +2235,11 @@ function buildRecurrenceAnalysisData() {
   const rowsFinalizadas = allRows.filter(os => normalizeStatus(os.status) === 'FINALIZADA');
   
   // NOVO: Removemos as O.S. internas. Apenas OS finalizadas por equipes cadastradas seguem para o cálculo.
-  const rowsEquipesCadastradas = rowsFinalizadas.filter(os => selectedTechs.byKey.has(os._techKey) || selectedTechs.byOriginal.has(normalizeText(os.nomeOriginal || os.nome || '')));
+  const rowsEquipesCadastradas = selectedTechs.hasTeamFilter
+    ? rowsFinalizadas.filter(os => selectedTechs.byKey.has(os._techKey) || selectedTechs.byOriginal.has(normalizeText(os.nomeOriginal || os.nome || '')))
+    : rowsFinalizadas;
   const rowsInSelectedMonth = rowsEquipesCadastradas.filter(os => os.monthStr === state.activeMonthYear && String(os.filial).trim() !== '5');
-  const seedRows = rowsInSelectedMonth;
+  const seedRows = rowsInSelectedMonth.filter(os => !isViabilitySubject(os.assunto));
 
   const seedGroups = {};
   seedRows.forEach(os => {
@@ -1942,6 +2247,17 @@ function buildRecurrenceAnalysisData() {
     if (!identity) return;
     if (!seedGroups[identity.key]) seedGroups[identity.key] = [];
     seedGroups[identity.key].push(os);
+  });
+
+  const rowsByIdentity = {};
+  rowsInSelectedMonth.forEach(os => {
+    const identity = getRecurrenceIdentityStrict(os);
+    if (!identity) return;
+    if (!rowsByIdentity[identity.key]) rowsByIdentity[identity.key] = [];
+    rowsByIdentity[identity.key].push(os);
+  });
+  Object.keys(rowsByIdentity).forEach(identityKey => {
+    rowsByIdentity[identityKey].sort((a, b) => a._date - b._date);
   });
 
   const totalClientesAnalisados = Object.keys(seedGroups).length;
@@ -1962,21 +2278,24 @@ function buildRecurrenceAnalysisData() {
     const dataLimite = new Date(primeiraOS._date);
     dataLimite.setDate(dataLimite.getDate() + settings.diasAnalise);
 
-    const allRowsForClient = rowsInSelectedMonth
-      .filter(os => {
-        const currentIdentity = getRecurrenceIdentityStrict(os);
-        if (!currentIdentity || currentIdentity.key !== identityKey) return false;
-        return os._date >= primeiraOS._date && os._date <= dataLimite;
-      })
-      .sort((a, b) => a._date - b._date);
+    const allRowsForClient = (rowsByIdentity[identityKey] || []).filter(os =>
+      os._date >= primeiraOS._date && os._date <= dataLimite
+    );
 
-    const validRowsForClient = allRowsForClient.filter((os, index) => {
-      if (index === 0) return true; 
-      const assuntoNorm = normalizeText(os.assunto || '');
-      return !EXCLUDED_RECURRENCE_SUBJECTS.some(ex => assuntoNorm.includes(ex));
-    });
+    const validRowsForClient = [];
+    for (let index = 0; index < allRowsForClient.length; index++) {
+      const os = allRowsForClient[index];
+      if (index === 0 || !isExcludedRecurrenceSubject(os.assunto, EXCLUDED_RECURRENCE_SUBJECTS)) {
+        validRowsForClient.push(os);
+      }
+    }
 
     if (validRowsForClient.length < settings.minimoOsParaReincidencia) return;
+    const statsRowsForClient = validRowsForClient.filter(os => (
+      !isExcludedRecurrenceSubject(os.assunto, EXCLUDED_RECURRENCE_SUBJECTS) &&
+      !isExcludedRecurrenceDiagnosis(os.diagnostico)
+    ));
+    const rowsForSubjectAndDiagnosis = statsRowsForClient;
 
     const ultimaOS = validRowsForClient[validRowsForClient.length - 1];
     const diasEntre = diffDays(primeiraOS._date, ultimaOS._date);
@@ -1985,13 +2304,12 @@ function buildRecurrenceAnalysisData() {
       intervalos.push(diffDays(validRowsForClient[i - 1]._date, validRowsForClient[i]._date));
     }
     const mediaDias = intervalos.length ? roundToOne(intervalos.reduce((sum, val) => sum + val, 0) / intervalos.length) : 0;
-    const assuntos = validRowsForClient.map(os => os.assunto || 'Sem assunto');
-    const diagnosticos = validRowsForClient.map(os => os.diagnostico || 'Sem diagnostico');
+    const assuntos = rowsForSubjectAndDiagnosis.map(os => os.assunto || 'Sem assunto');
     const assuntoCounts = {};
     const diagnosticoCounts = {};
     const diagStats = {};
     assuntos.forEach(assunto => { assuntoCounts[assunto] = (assuntoCounts[assunto] || 0) + 1; });
-    validRowsForClient.forEach((os, idx) => {
+    rowsForSubjectAndDiagnosis.forEach((os, idx) => {
       const d = os.diagnostico || 'Sem diagnostico';
       diagnosticoCounts[d] = (diagnosticoCounts[d] || 0) + 1;
       if (!diagStats[d]) diagStats[d] = { count: 0, lastIdx: idx };
@@ -2058,14 +2376,14 @@ function buildRecurrenceAnalysisData() {
     totalOsReincidentes += validRowsForClient.length;
     somaMediasDias += mediaDias;
 
-    validRowsForClient.forEach(os => {
+    rowsForSubjectAndDiagnosis.forEach(os => {
       const assuntoKey = os.assunto || 'Sem assunto';
       if (!assuntoStats[assuntoKey]) assuntoStats[assuntoKey] = { quantidade: 0, intervals: [] };
       assuntoStats[assuntoKey].quantidade++;
     });
 
     Object.entries(assuntoCounts).forEach(([assunto]) => {
-      const rowsMesmoAssunto = validRowsForClient.filter(os => (os.assunto || 'Sem assunto') === assunto);
+      const rowsMesmoAssunto = rowsForSubjectAndDiagnosis.filter(os => (os.assunto || 'Sem assunto') === assunto);
       for (let i = 1; i < rowsMesmoAssunto.length; i++) {
         assuntoStats[assunto].intervals.push(diffDays(rowsMesmoAssunto[i - 1]._date, rowsMesmoAssunto[i]._date));
       }
@@ -2159,7 +2477,7 @@ function renderRecorrenciaClientes() {
   const container = document.getElementById('recorrenciaSection');
   if (!container) return;
 
-  if (!state.rawExcelCache.length) {
+  if (!getRecurrenceSourceRows().length) {
     container.innerHTML = '<div class="empty-state-card">Carregue uma planilha para analisar reincidencia por login ou cliente.</div>';
     return;
   }
@@ -2217,7 +2535,11 @@ function renderRecorrenciaClientes() {
       const inCliente = (i.cliente || '').toLowerCase().includes(term);
       const inAssunto = (i.assunto_principal || '').toLowerCase().includes(term);
       const inDiag = (i.diagnostico_principal || '').toLowerCase().includes(term);
-      if (!inLogin && !inCliente && !inAssunto && !inDiag) return false;
+      const inHistory = (i.historico_os || []).some(os =>
+        (os.assunto || '').toLowerCase().includes(term) ||
+        (os.diagnostico || '').toLowerCase().includes(term)
+      );
+      if (!inLogin && !inCliente && !inAssunto && !inDiag && !inHistory) return false;
     }
     return true;
   });
@@ -2263,7 +2585,9 @@ function renderRecorrenciaClientes() {
   const filteredAssuntoStats = {};
   const filteredTecnicoStats = {};
   const filteredDiagnosticoStats = {};
+  const excludedRecurrenceSubjects = getExcludedRecurrenceSubjects();
   let filteredTotalOs = 0;
+  let filteredTotalRetrabalho = 0;
 
   filteredReincidentes.forEach(item => {
     filteredTotalOs += item.historico_os.length;
@@ -2285,6 +2609,13 @@ function renderRecorrenciaClientes() {
       const diagKey = os.diagnostico || 'Sem diagnóstico';
       if (!filteredDiagnosticoStats[diagKey]) filteredDiagnosticoStats[diagKey] = { quantidade: 0 };
       filteredDiagnosticoStats[diagKey].quantidade++;
+      // Contabiliza o diagnóstico apenas para O.S. de retorno (ignora a Origem/Instalação)
+      if (!os.is_origem) {
+        filteredTotalRetrabalho++;
+        const diagKey = os.diagnostico || 'Sem diagnóstico';
+        if (!filteredDiagnosticoStats[diagKey]) filteredDiagnosticoStats[diagKey] = { quantidade: 0 };
+        filteredDiagnosticoStats[diagKey].quantidade++;
+      }
     });
 
     Object.entries(assuntoGroups).forEach(([assuntoKey, rows]) => {
@@ -2303,8 +2634,22 @@ function renderRecorrenciaClientes() {
     .map(([tecnico, data]) => ({ tecnico, total_os_reincidentes: data.total_os, clientes_reincidentes_atendidos: data.clientes.size, taxa_envolvimento: filteredTotalOs ? roundToOne((data.total_os / filteredTotalOs) * 100) : 0 }))
     .sort((a, b) => b.total_os_reincidentes - a.total_os_reincidentes || a.tecnico.localeCompare(b.tecnico));
 
-  const calcEstatisticasPorDiagnostico = Object.entries(filteredDiagnosticoStats)
-    .map(([diagnostico, data]) => ({ diagnostico, quantidade: data.quantidade, percentual: filteredTotalOs ? roundToOne((data.quantidade / filteredTotalOs) * 100) : 0 }))
+  const recurrenceDiagnosticoStats = {};
+  let recurrenceDiagnosticoTotal = 0;
+  filteredReincidentes.forEach(item => {
+    (item.historico_os || []).forEach(os => {
+      if (os.is_origem) return;
+      if (isExcludedRecurrenceSubject(os.assunto, excludedRecurrenceSubjects)) return;
+      if (isExcludedRecurrenceDiagnosis(os.diagnostico)) return;
+      const diagnosticoKey = os.diagnostico || 'Sem diagnostico';
+      if (!recurrenceDiagnosticoStats[diagnosticoKey]) recurrenceDiagnosticoStats[diagnosticoKey] = { quantidade: 0 };
+      recurrenceDiagnosticoStats[diagnosticoKey].quantidade++;
+      recurrenceDiagnosticoTotal++;
+    });
+  });
+
+  const calcEstatisticasPorDiagnostico = Object.entries(recurrenceDiagnosticoStats)
+    .map(([diagnostico, data]) => ({ diagnostico, quantidade: data.quantidade, percentual: recurrenceDiagnosticoTotal ? roundToOne((data.quantidade / recurrenceDiagnosticoTotal) * 100) : 0 }))
     .sort((a, b) => b.quantidade - a.quantidade || a.diagnostico.localeCompare(b.diagnostico));
 
   const assuntoHtml = calcEstatisticasPorAssunto.length
@@ -2687,8 +3032,9 @@ function resetRecorrenciaFiltros() {
 function evaluateTechsByAI() {
   if(!Object.keys(state.globalTechStats).length)return;
   state.pendingTechs=[]; state.reclassifySuggestions=[];
+  const resolver = buildTeamResolver();
   const cache={};
-  const matchTeam=nome=>{if(cache[nome]!==undefined)return cache[nome];for(const k in state.teamData){if(nome===k||nome.includes(k)||k.includes(nome)){cache[nome]=k;return k;}}cache[nome]=null;return null;};
+  const matchTeam=nome=>{const team=resolveTeamData(nome,resolver,cache);return team?team.techKey:null;};
   Object.keys(state.globalTechStats).forEach(nome=>{
     const s=state.globalTechStats[nome];
     const pR=s.rural/s.total, da=[...s.days].sort((a,b)=>a-b), dt=da.length;
@@ -2749,23 +3095,24 @@ if(iD===-1||iR===-1)throw new Error("Colunas 'Responsável' e/ou 'Data' não enc
 // NOVO: Adicionei CHÁCARA e KM na busca para varrer endereços/bairros
 const rR=/(RURAL|FAZENDA|S[IÍ]TIO|LINHA |GLEBA|PROJETO|CH[AÁ]CARA|KM \\d)/i; 
 
-for(let i=1;i<rows.length;i++){const dt=rows[i][iD],rp=rows[i][iR];if(!dt||!rp||String(rp).toLowerCase().includes("filtros"))continue;const d=extractDate(dt);if(!d)continue;const nm=cleanStr(rp);const mk=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,'0');pm[mk]=(pm[mk]||0)+1;
+const mapFiliais={"6":"UNI - JI PARANA","7":"UNI - MACHADINHO DOESTE","8":"UNI - ROLIM DE MOURA","9":"UNI - JARU","10":"UNI - OURO PRETO DOESTE","11":"UNI - NOVA BRASILANDIA DOESTE","12":"UNI - PRESIDENTE MEDICI","13":"UNI - SAO FELIPE DOESTE","14":"UNI - ALVORADA DOESTE","15":"UNI - ALTA FLORESTA DOESTE","16":"UNI - SAO MIGUEL DO GUAPORE","17":"UNI - SERINGUEIRAS","18":"UNI - SAO FRANCISCO DO GUAPORE"};
+function hasRuralHint(row){for(let j=0;j<row.length;j++){const cell=row[j];if(cell&&rR.test(String(cell)))return true;}return false;}
+for(let i=1;i<rows.length;i++){const row=rows[i],dt=row[iD],rp=row[iR];if(!dt||!rp||String(rp).toLowerCase().includes("filtros"))continue;const d=extractDate(dt);if(!d)continue;const nm=cleanStr(rp);const mk=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,'0');pm[mk]=(pm[mk]||0)+1;
 const localDateStr=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,'0')+"-"+String(d.getDate()).padStart(2,'0');
 
 // Lê a linha inteira da planilha (incluindo endereço/bairro) e testa as palavras-chave rurais
-let isR=rR.test(rows[i].join(" ")); 
+let isR=hasRuralHint(row); 
 
-if(!ts[nm])ts[nm]={total:0,rural:0,days:new Set()};ts[nm].total++;if(isR)ts[nm].rural++;ts[nm].days.add(d.getDate());const assunto=iA>=0?String(rows[i][iA]||'').trim():'';const diagnostico=iDg>=0?String(rows[i][iDg]||'').trim():'';
-const contrato=iCt>=0?String(rows[i][iCt]||'').trim():'';
-const cliente=iCl>=0?String(rows[i][iCl]||'').trim():'';
-const login=iLg>=0?String(rows[i][iLg]||'').trim():'';
-const status=iSt>=0?String(rows[i][iSt]||'').trim():'';
+if(!ts[nm])ts[nm]={total:0,rural:0,days:new Set()};ts[nm].total++;if(isR)ts[nm].rural++;ts[nm].days.add(d.getDate());const assunto=iA>=0?String(row[iA]||'').trim():'';const diagnostico=iDg>=0?String(row[iDg]||'').trim():'';
+const contrato=iCt>=0?String(row[iCt]||'').trim():'';
+const cliente=iCl>=0?String(row[iCl]||'').trim():'';
+const login=iLg>=0?String(row[iLg]||'').trim():'';
+const status=iSt>=0?String(row[iSt]||'').trim():'';
 const osId=iOs>=0?String(rows[i][iOs]||'').trim():'—'; 
-const rawFilial=iFi>=0?String(rows[i][iFi]||'').trim():'';
-const mapFiliais={"6":"UNI - JI PARANA","7":"UNI - MACHADINHO DOESTE","8":"UNI - ROLIM DE MOURA","9":"UNI - JARU","10":"UNI - OURO PRETO DOESTE","11":"UNI - NOVA BRASILANDIA DOESTE","12":"UNI - PRESIDENTE MEDICI","13":"UNI - SAO FELIPE DOESTE","14":"UNI - ALVORADA DOESTE","15":"UNI - ALTA FLORESTA DOESTE","16":"UNI - SAO MIGUEL DO GUAPORE","17":"UNI - SERINGUEIRAS","18":"UNI - SAO FRANCISCO DO GUAPORE"};
+const rawFilial=iFi>=0?String(row[iFi]||'').trim():'';
 const filial=mapFiliais[rawFilial]||rawFilial||'NÃO INFORMADA';
-const dtInicio = iIn>=0 ? extractDate(rows[i][iIn]) : null;
-const dtFinal = iFn>=0 ? extractDate(rows[i][iFn]) : null;
+const dtInicio = iIn>=0 ? extractDate(row[iIn]) : null;
+const dtFinal = iFn>=0 ? extractDate(row[iFn]) : null;
 
 // NOVO: Passa o isRural para frente junto com a O.S. (Corrigido para usar fuso local na dateStr)
 vr.push({nome:nm,nomeOriginal:String(rp||'').trim(),day:d.getDate(),monthStr:mk,dateStr:localDateStr,dateTimeStr:d.toISOString(),assunto,diagnostico,contrato,cliente,login,status,osId,isRural:isR,filial,dtInicio:dtInicio?dtInicio.toISOString():null,dtFinal:dtFinal?dtFinal.toISOString():null}); 
@@ -2777,9 +3124,45 @@ function initWorker() {
   state.workerBlobUrl = URL.createObjectURL(blob);
 }
 
+function buildTeamResolver() {
+  const exact = Object.create(null);
+  const partial = [];
+  Object.entries(state.teamData).forEach(([key, info]) => {
+    const resolved = {
+      techKey: key,
+      cidade: info.base,
+      tipo: info.tipo || 'INSTALAÇÃO CIDADE'
+    };
+    resolved.tipo = info.tipo || Object.keys(TEAM_TYPES)[0];
+    exact[key] = resolved;
+    partial.push([key, resolved]);
+  });
+  partial.sort((a, b) => b[0].length - a[0].length);
+  return { exact, partial };
+}
+
+function resolveTeamData(nome, resolver, cache) {
+  if (Object.prototype.hasOwnProperty.call(cache, nome)) return cache[nome];
+  const exactMatch = resolver.exact[nome];
+  if (exactMatch) {
+    cache[nome] = exactMatch;
+    return exactMatch;
+  }
+  for (let i = 0; i < resolver.partial.length; i++) {
+    const [key, resolved] = resolver.partial[i];
+    if (nome.includes(key) || key.includes(nome)) {
+      cache[nome] = resolved;
+      return resolved;
+    }
+  }
+  cache[nome] = null;
+  return null;
+}
+
 function applyUploadedData(payload) {
   if (!payload?.allOS?.length) return false;
   resetRecurrenceCache();
+  state.filterViewCache = {};
   
   // NOVO: Garantir um ID único por linha para impedir falsas colisões em O.S. genéricas
   payload.allOS.forEach((os, idx) => {
@@ -2788,6 +3171,7 @@ function applyUploadedData(payload) {
 
   state.activeMonthYear = payload.activeMonth;
   state.rawExcelCache = payload.allOS;
+  state.globalRawDataByMonth = {};
   state.globalTechStats = payload.techStats || {};
   state.uploadMeta = payload.uploadMeta || {
     hasContrato: state.rawExcelCache.some(os => !!os.contrato),
@@ -2899,8 +3283,45 @@ function parseFileWithWorker(event) {
 function rebuildGlobalRawData() {
   if (!state.rawExcelCache || !state.rawExcelCache.length) return;
   resetRecurrenceCache();
-  state.globalRawData = [];
-  const cache = {};
+  state.filterViewCache = {};
+  const resolver = buildTeamResolver();
+  const resolvedNames = Object.create(null);
+  const enrichedRows = [];
+  const byMonth = Object.create(null);
+  state.rawExcelCache.forEach(os => {
+    const team = resolveTeamData(os.nome || '', resolver, resolvedNames);
+    if (!team) return;
+    const row = {
+      _uid: os._uid,
+      techKey: team.techKey,
+      cidade: team.cidade,
+      tipo: team.tipo,
+      day: os.day,
+      monthStr: os.monthStr,
+      dateStr: os.dateStr || '',
+      dateTimeStr: os.dateTimeStr || os.dateStr || '',
+      contrato: os.contrato || '',
+      cliente: os.cliente || '',
+      login: os.login || '',
+      status: os.status || '',
+      nome: os.nome || '',
+      nomeOriginal: os.nomeOriginal || os.nome || '',
+      assunto: os.assunto,
+      diagnostico: os.diagnostico,
+      osId: os.osId,
+      isRural: os.isRural,
+      filial: os.filial || 'NÃO INFORMADA',
+      dtInicio: os.dtInicio,
+      dtFinal: os.dtFinal
+    };
+    enrichedRows.push(row);
+    if (!byMonth[row.monthStr]) byMonth[row.monthStr] = [];
+    byMonth[row.monthStr].push(row);
+  });
+  state.globalRawData = enrichedRows;
+  state.globalRawDataByMonth = byMonth;
+  applyFilters();
+  return;
   state.rawExcelCache.forEach(os => {
     let tk = cache[os.nome];
     if (tk === undefined) {
@@ -2950,7 +3371,11 @@ function applyFilters() {
   const ft=document.getElementById('filterType')?.value||'ALL';
   const fm=document.getElementById('filterTypeMob'); if(fm)fm.value=ft;
   const fc=state.selectedCityTab;
-  const filtered=state.globalRawData.filter(i=>i.monthStr===state.activeMonthYear&&(fc==='ALL'||i.cidade===fc)&&(ft==='ALL'||i.tipo===ft));
+  const monthRows = state.globalRawDataByMonth?.[state.activeMonthYear] || [];
+  const filtered = (fc === 'ALL' && ft === 'ALL')
+    ? monthRows
+    : monthRows.filter(i => (fc === 'ALL' || i.cidade === fc) && (ft === 'ALL' || i.tipo === ft));
+  buildCurrentFilterMeta(filtered);
   updateDashboardStats(filtered);
   generateMatrix(filtered);
   document.getElementById('legendBar').style.display='flex';
@@ -2958,21 +3383,22 @@ function applyFilters() {
   const capSection = document.getElementById('capSection');
   if(capSection && document.getElementById('view-capacidades')?.classList.contains('active')) {
     renderCapacidades();
+    syncCapacidadesContext();
   }
   setTimeout(() => {
-    getRecorrenciaViewData();
     buildOperationalAnalysis(filtered);
     if (document.getElementById('view-recorrencia')?.classList.contains('active')) {
+      getRecorrenciaViewData();
       renderRecorrenciaClientes();
     }
   }, 50);
 }
 
 function syncEcosystem() {
+  rebuildGlobalRawData();
   populateFilters();
   renderTeamTable();
   evaluateTechsByAI();
-  rebuildGlobalRawData();
 }
 
 let _searchTimeout = null;
@@ -3015,6 +3441,7 @@ function saveGlobalSettings() {
   const sabEl = document.getElementById('cfgMetaSabadoPct');
   if(sabEl) state.appSettings.metaSabadoPct = parseInt(sabEl.value)||50;
   saveSettings();
+  state.filterViewCache = {};
   if (state.globalRawData.length) applyFilters();
   showToast('Metas salvas com sucesso.','success');
 }
@@ -3442,6 +3869,210 @@ function exportMotoExcel() {
   XLSX.writeFile(wb, `SGO_Oportunidades_Moto_${state.activeMonthYear}.xlsx`);
 }
 
+function renderTechRow(tk, data, dIM, fdw, cidade) {
+  const isAux = data.tipo === 'AUXILIAR';
+  const meta = isAux ? 0 : (state.appSettings.metasDiarias[data.tipo]||5);
+  const nome = state.teamData[tk].originalName;
+  const tipo = TEAM_TYPES[data.tipo]||data.tipo;
+  const ce = meta * (data.tipo==='TECNICO 12/36H' ? 15 : 24);
+  const cb = Math.max(0, (meta - 1) * (data.tipo==='TECNICO 12/36H' ? 15 : 24));
+  const cm2 = Math.max(0, (meta - 2) * (data.tipo==='TECNICO 12/36H' ? 15 : 24));
+  const auxBadge = isAux && data.total > 0 ? `<span class="aux-badge">âœ“ ${data.total} OS</span>` : '';
+  const initials = nome.split(' ').filter(w => w.length > 2).slice(0, 2).map(w => w[0]).join('');
+  const cityStr = cidade ? `,'${cidade.replace(/'/g, "\\\\'")}'` : ",''";
+  const tkStr = tk ? `,'${tk.replace(/'/g, "\\\\'")}'` : '';
+  const monthlyItems = state.globalRawData.filter(i =>
+    i.monthStr === state.activeMonthYear &&
+    i.cidade === cidade &&
+    i.techKey === tk
+  );
+  const tmaStats = getTmaStats(monthlyItems);
+
+  let row = `<tr class="mat-row${isAux?' aux-row':''}"><td class="cn">
+    <div class="cn-inner">
+      <div class="cn-avatar" style="background:rgba(255,255,255,0.06);color:#7A92AA;border:1px solid rgba(255,255,255,0.10);">${initials}</div>
+      <div class="cn-info">
+        <div class="cn-name">${nome}${auxBadge}</div>
+        <span class="cn-badge" style="background:rgba(255,255,255,0.05);color:#7A92AA;border:1px solid rgba(255,255,255,0.10);">${tipo}</span>
+      </div>
+    </div>
+  </td>`;
+
+  let wt = 0, cur = 0;
+  for (let i = 0; i < fdw; i++) {
+    const dow = i;
+    row += `<td class="${(dow===0||dow===6)?'cwknd':''}"></td>`;
+    cur++;
+  }
+  for (let d = 1; d <= dIM; d++) {
+    if (cur > 6) { row += `<td class="ctot">${wt>0?wt:''}</td>`; wt = 0; cur = 0; }
+    const v = data.dias[d] || 0; wt += v;
+    const dow = (fdw + d - 1) % 7;
+    const wk = dow === 0 || dow === 6;
+    const vc = isAux ? (v > 0 ? 'vg' : 'vd') : vC(v, meta, dow, data.tipo);
+    row += `<td class="${vc}${wk?' cwknd':''}${isAux?' aux-cell':''}" ${v>0?`style="cursor:pointer;transition:transform 0.1s;" onmouseover="this.style.transform='scale(1.15)'" onmouseout="this.style.transform='none'" onclick="App.showDayDetails(${d}${cityStr}${tkStr})" title="Ver ${v} O.S. do dia ${d}"`:''}>${v>0?v:''}</td>`;
+    cur++;
+  }
+  if (cur > 0) {
+    for (let i = 0; i < 7 - cur; i++) row += `<td></td>`;
+    row += `<td class="ctot">${wt>0?wt:''}</td>`;
+  }
+
+  const onClickTot = `style="cursor:pointer;transition:opacity 0.2s;" onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'" onclick="App.showDayDetails(null${cityStr}${tkStr})" title="Ver todas as ${data.total} O.S. no mes${tmaStats.count ? ` | TMA medio ${formatMinutesCompact(tmaStats.avgMinutes)} | TMA somado ${formatMinutesCompact(tmaStats.totalMinutes)}` : ''}"`;
+  if (isAux) {
+    row += `<td class="ctos ${data.total>0?'tg':'vd'}" ${data.total>0?onClickTot:''}>${data.total||'--'}</td>`;
+    row += `<td class="ccap" colspan="3" style="color:var(--text-3);font-size:10px;text-align:center;font-style:italic;">sem meta</td></tr>`;
+  } else {
+    row += `<td class="ctos ${tC(data.total, ce, cb, cm2)}" ${data.total>0?onClickTot:''}>${data.total}</td>`;
+    row += `<td class="ccap cg">${ce}</td><td class="ccap cb">${cb>0?cb:0}</td><td class="ccap cy">${cm2>0?cm2:0}</td></tr>`;
+  }
+  return row;
+}
+
+function showDayDetails(day, cidade, techKey) {
+  if (!state.globalRawData.length) return;
+
+  let filtered = state.currentFiltered || [];
+  if (cidade && techKey) {
+    filtered = state.currentFilterMeta?.techItems?.[`${cidade}::${techKey}`] || [];
+  } else if (cidade) {
+    filtered = state.currentFilterMeta?.cityItems?.[cidade] || [];
+  }
+  if (day !== null) filtered = filtered.filter(i => i.day === day);
+  if (!filtered.length) {
+    showToast('Nenhuma O.S. encontrada para este dia.', 'info');
+    return;
+  }
+
+  state.currentDayDetails = filtered;
+  state.currentDayDetailsDay = day;
+
+  let overlay = document.getElementById('dayDetailsModalOverlay');
+  if (overlay) overlay.remove();
+  overlay = document.createElement('div');
+  overlay.id = 'dayDetailsModalOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.6);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);animation:fadeIn .15s ease;padding:16px;';
+
+  const tmaStats = getTmaStats(filtered);
+  const thresholdMinutes = getTmaAlertThresholdMinutes(filtered, techKey);
+  const aboveThresholdCount = filtered.map(getOsTmaMinutes).filter(v => v != null && v >= thresholdMinutes).length;
+  const aboveThresholdPct = tmaStats.count ? Math.round((aboveThresholdCount / tmaStats.count) * 100) : 0;
+  const activeTmaDays = new Set(filtered.filter(item => getOsTmaMinutes(item) != null).map(item => item.dateStr || `${item.monthStr}-${String(item.day).padStart(2, '0')}`)).size;
+  const avgTmaStr = tmaStats.count ? formatMinutesCompact(tmaStats.avgMinutes) : '--';
+  const sumTmaStr = tmaStats.count ? formatMinutesCompact(tmaStats.totalMinutes) : '--';
+  const dailyAvgTmaStr = activeTmaDays > 0 ? formatMinutesCompact(tmaStats.totalMinutes / activeTmaDays) : '--';
+  const maxTmaStr = tmaStats.count ? formatMinutesCompact(tmaStats.maxMinutes) : '--';
+  let subtitle = `Regional: ${escapeHtml(cidade || 'Todas')}`;
+  if (techKey) subtitle += ` | Tecnico: ${escapeHtml(state.teamData[techKey]?.originalName || techKey)}`;
+
+  const riskBg = aboveThresholdPct >= 30 ? 'rgba(239,68,68,.12)' : aboveThresholdPct >= 15 ? 'rgba(245,158,11,.12)' : 'rgba(16,185,129,.12)';
+  const riskBorder = aboveThresholdPct >= 30 ? 'rgba(239,68,68,.22)' : aboveThresholdPct >= 15 ? 'rgba(245,158,11,.22)' : 'rgba(16,185,129,.22)';
+  const riskText = aboveThresholdPct >= 30 ? '#DC2626' : aboveThresholdPct >= 15 ? '#B45309' : '#047857';
+
+  overlay.innerHTML = `
+    <div style="background:var(--surface-card);border:1px solid var(--surface-border);border-radius:16px;max-width:950px;width:100%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.5);animation:scaleIn .15s ease;overflow:hidden;">
+      <div style="padding:20px 24px;border-bottom:1px solid var(--surface-border);display:flex;justify-content:space-between;align-items:center;background:var(--surface-card2);flex-wrap:wrap;gap:12px;">
+        <div>
+          <div style="font-size:16px;font-weight:800;color:var(--text-primary);">Detalhamento de O.S. - ${day !== null ? `Dia ${day}` : 'Mes Completo'}</div>
+          <div style="font-size:12px;color:var(--text-tertiary);margin-top:2px;">${subtitle} | <b style="color:var(--text-secondary);">${filtered.length} O.S.</b> | TMA medio: <b style="color:var(--blue);">${avgTmaStr}</b> | TMA medio diario: <b style="color:#0F766E;">${dailyAvgTmaStr}</b> | TMA somado: <b style="color:var(--accent);">${sumTmaStr}</b></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+            <span style="padding:5px 9px;border-radius:999px;background:rgba(14,165,233,.10);border:1px solid rgba(14,165,233,.20);font-size:11px;color:var(--text-secondary);">Maior ${maxTmaStr}</span>
+            <span style="padding:5px 9px;border-radius:999px;background:${riskBg};border:1px solid ${riskBorder};font-size:11px;color:${riskText};">${tmaStats.count ? `${aboveThresholdPct}% das OS acima de ${thresholdMinutes >= 120 ? '2h' : '1h'}` : 'Sem TMA valido'}</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input type="text" id="dayDetailsSearch" placeholder="Buscar cliente, OS, assunto..." oninput="App.filterDayDetails()" style="padding:7px 12px;border-radius:8px;border:1px solid var(--surface-border);background:var(--surface-card);color:var(--text-primary);font-size:12px;font-family:var(--font);outline:none;min-width:220px;">
+          <select id="dayDetailsSort" onchange="App.filterDayDetails()" style="padding:7px 12px;border-radius:8px;border:1px solid var(--surface-border);background:var(--surface-card);color:var(--text-primary);font-size:12px;font-family:var(--font);outline:none;">
+            <option value="crono">Ordem Cronologica</option>
+            <option value="assunto">Por Assunto</option>
+            <option value="tma">Maior TMA</option>
+          </select>
+          <button id="closeDayDetailsModal" style="background:var(--hover-white-04);border:1px solid var(--surface-border);border-radius:8px;color:var(--text-tertiary);font-size:14px;cursor:pointer;width:32px;height:32px;display:flex;align-items:center;justify-content:center;transition:all var(--dur-fast);">X</button>
+        </div>
+      </div>
+      <div style="overflow-y:auto;padding:0;flex:1;"><table style="width:100%;border-collapse:collapse;text-align:left;"><thead style="background:var(--surface-card2);position:sticky;top:0;box-shadow:0 1px 2px rgba(0,0,0,0.05);z-index:2;"><tr><th style="padding:12px;font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:var(--mono);">Protocolo</th>${day === null ? `<th style="padding:12px;font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:var(--mono);">Data</th>` : ''}<th style="padding:12px;font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:var(--mono);">Tecnico</th><th style="padding:12px;font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:var(--mono);">Assunto / Diagnostico</th><th style="padding:12px;font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:var(--mono);">TMA</th><th style="padding:12px;font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:var(--mono);">Cliente/Login</th></tr></thead><tbody id="dayDetailsBody"></tbody></table></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const closeBtn = document.getElementById('closeDayDetailsModal');
+  closeBtn.onclick = () => overlay.remove();
+  closeBtn.onmouseover = () => { closeBtn.style.background = 'var(--hover-white-08)'; closeBtn.style.color = 'var(--text-primary)'; };
+  closeBtn.onmouseout = () => { closeBtn.style.background = 'var(--hover-white-04)'; closeBtn.style.color = 'var(--text-tertiary)'; };
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  filterDayDetails();
+}
+
+function filterDayDetails() {
+  const tbody = document.getElementById('dayDetailsBody');
+  if (!tbody) return;
+  const search = (document.getElementById('dayDetailsSearch')?.value || '').toLowerCase();
+  const sort = document.getElementById('dayDetailsSort')?.value || 'crono';
+  const day = state.currentDayDetailsDay;
+
+  let list = [...state.currentDayDetails];
+  if (search) {
+    list = list.filter(os =>
+      (os.osId || '').toLowerCase().includes(search) ||
+      (os.cliente || '').toLowerCase().includes(search) ||
+      (os.login || '').toLowerCase().includes(search) ||
+      (os.assunto || '').toLowerCase().includes(search) ||
+      (os.diagnostico || '').toLowerCase().includes(search) ||
+      (os.nomeOriginal || os.nome || '').toLowerCase().includes(search)
+    );
+  }
+
+  if (sort === 'crono') {
+    list.sort((a, b) => (day === null ? a.day - b.day : 0) || (a.nomeOriginal || a.nome).localeCompare(b.nomeOriginal || b.nome));
+  } else if (sort === 'assunto') {
+    list.sort((a, b) => (a.assunto || '').localeCompare(b.assunto || '') || (day === null ? a.day - b.day : 0));
+  } else if (sort === 'tma') {
+    list.sort((a, b) => (getOsTmaMinutes(b) ?? -1) - (getOsTmaMinutes(a) ?? -1));
+  }
+
+  const getIcon = (txt) => {
+    const t = (txt||'').toLowerCase();
+    if(t.includes('troca') || t.includes('remo')) return '[Troca]';
+    if(t.includes('conex') || t.includes('sinal') || t.includes('fibra')) return '[Rede]';
+    if(t.includes('login') || t.includes('senha')) return '[Login]';
+    if(t.includes('apps') || t.includes('streaming')) return '[Apps]';
+    return '[OS]';
+  };
+
+  tbody.innerHTML = list.length ? list.map((os, idx) => {
+    const tmaMin = getOsTmaMinutes(os);
+    return `
+    <tr style="border-bottom:1px solid var(--surface-border);background:${idx % 2 === 0 ? 'transparent' : 'var(--surface-card2)'}">
+      <td style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:var(--accent);white-space:nowrap;">${escapeHtml(os.osId)}</td>
+      ${day === null ? `<td style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:var(--text-secondary);white-space:nowrap;">${os.day}/${os.monthStr.split('-')[1]}</td>` : ''}
+      <td style="padding:10px 12px;font-size:12px;white-space:nowrap;">
+        <b style="color:var(--text-primary);display:block;">${escapeHtml(os.nomeOriginal || os.nome)}</b>
+        <span style="font-size:10px;color:var(--text-tertiary);font-family:var(--mono);">${escapeHtml(TEAM_TYPES[os.tipo] || os.tipo)}</span>
+      </td>
+      <td style="padding:10px 12px;font-size:11px;line-height:1.4;">
+        <span style="color:var(--text-secondary);">${getIcon(os.assunto)} ${escapeHtml(os.assunto)}</span><br>
+        <span style="font-size:10px;color:var(--text-tertiary);font-style:italic;">${escapeHtml(os.diagnostico)}</span>
+      </td>
+      <td style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:var(--blue);font-weight:700;">${tmaMin !== null ? formatMinutesCompact(tmaMin) : '--'}</td>
+      <td style="padding:10px 12px;font-size:11px;color:var(--text-secondary);">${escapeHtml(os.cliente || os.login)}</td>
+    </tr>
+  `}).join('') : `<tr><td colspan="${day === null ? '6' : '5'}" style="padding:32px;text-align:center;color:var(--text-tertiary);font-size:12px;">Nenhuma O.S. encontrada para esta busca.</td></tr>`;
+}
+
+function syncCapacidadesContext() {
+  const capSection = document.getElementById('capSection');
+  if (!capSection) return;
+
+  const titles = capSection.querySelectorAll('.cap-section-title');
+  const totalLabel = fc => fc === 'ALL' ? 'TOTAL GERAL' : `TOTAL ${fc}`;
+  const city = state.selectedCityTab || 'ALL';
+
+  if (titles[0]) titles[0].textContent = city === 'ALL' ? 'Capacidade por Filial e Tipo de Equipe' : `Capacidade da Regional ${city}`;
+  const sideTitleSpan = titles[1]?.querySelector('span');
+  if (sideTitleSpan) sideTitleSpan.textContent = city === 'ALL' ? 'Resumo Geral' : `Resumo da Regional ${city}`;
+
+  const totalCell = capSection.querySelector('.cap-total .cap-cidade');
+  if (totalCell) totalCell.textContent = totalLabel(city);
+}
+
 window.App = {
   switchTab,
   toggleDark: () => toggleDark(() => { if (state.globalRawData.length) applyFilters(); }),
@@ -3536,3 +4167,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof showToast === 'function') showToast('Erro ao iniciar: ' + err.message, 'error', 8000);
   }
 });
+
+
