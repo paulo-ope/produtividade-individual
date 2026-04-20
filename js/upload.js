@@ -151,6 +151,52 @@ export function parseFileWithWorker(event) {
   reader.readAsArrayBuffer(file);
 }
 
+function buildTeamResolver() {
+  const exact = Object.create(null);
+  const partial = [];
+
+  Object.entries(state.teamData).forEach(([key, info]) => {
+    const resolved = {
+      techKey: key,
+      cidade: info.base,
+      tipo: info.tipo || 'INSTALAÇÃO CIDADE'
+    };
+    resolved.tipo = info.tipo || Object.keys(TEAM_TYPES)[0];
+    exact[key] = resolved;
+    partial.push([key, resolved]);
+  });
+
+  partial.sort((a, b) => b[0].length - a[0].length);
+  return { exact, partial };
+}
+
+function resolveTeamData(nome, resolver, cache) {
+  if (Object.prototype.hasOwnProperty.call(cache, nome)) return cache[nome];
+
+  const exactMatch = resolver.exact[nome];
+  if (exactMatch) {
+    cache[nome] = exactMatch;
+    return exactMatch;
+  }
+
+  for (let i = 0; i < resolver.partial.length; i++) {
+    const [key, resolved] = resolver.partial[i];
+    if (nome.includes(key) || key.includes(nome)) {
+      cache[nome] = resolved;
+      return resolved;
+    }
+  }
+
+  const fallback = {
+    techKey: nome,
+    cidade: 'PENDENTE',
+    tipo: 'INSTALAÇÃO CIDADE'
+  };
+  fallback.tipo = Object.keys(TEAM_TYPES)[0];
+  cache[nome] = fallback;
+  return fallback;
+}
+
 function applyUploadedData(payload) {
   if (!payload?.allOS?.length) return false;
 
@@ -161,6 +207,7 @@ function applyUploadedData(payload) {
 
   state.activeMonthYear = payload.activeMonth;
   state.rawExcelCache = payload.allOS;
+  state.globalRawDataByMonth = {};
   state.globalTechStats = payload.techStats || {};
   state.uploadMeta = payload.uploadMeta || {
     hasContrato: state.rawExcelCache.some(os => !!os.contrato),
@@ -213,6 +260,44 @@ export function changeActiveMonth(monthValue) {
 // ── Rebuild dados brutos ───────────────────────────────────
 export function rebuildGlobalRawData() {
   if (!state.rawExcelCache.length) return;
+  const resolver = buildTeamResolver();
+  const resolvedNames = Object.create(null);
+  const enrichedRows = new Array(state.rawExcelCache.length);
+  const byMonth = Object.create(null);
+  for (let idx = 0; idx < state.rawExcelCache.length; idx++) {
+    const os = state.rawExcelCache[idx];
+    const team = resolveTeamData(os.nome || '', resolver, resolvedNames);
+    const row = {
+      _uid: os._uid,
+      day: os.day,
+      monthStr: os.monthStr,
+      dateStr: os.dateStr || '',
+      dateTimeStr: os.dateTimeStr || os.dateStr || '',
+      contrato: os.contrato || '',
+      cliente: os.cliente || '',
+      login: os.login || '',
+      status: os.status || '',
+      nome: os.nome || '',
+      nomeOriginal: os.nomeOriginal || os.nome || '',
+      assunto: os.assunto,
+      diagnostico: os.diagnostico,
+      osId: os.osId,
+      isRural: os.isRural,
+      filial: os.filial || 'NÃƒO INFORMADA',
+      dtInicio: os.dtInicio,
+      dtFinal: os.dtFinal,
+      techKey: team.techKey,
+      cidade: team.cidade,
+      tipo: team.tipo
+    };
+    enrichedRows[idx] = row;
+    if (!byMonth[row.monthStr]) byMonth[row.monthStr] = [];
+    byMonth[row.monthStr].push(row);
+  }
+  state.globalRawData = enrichedRows;
+  state.globalRawDataByMonth = byMonth;
+  applyFilters();
+  return;
   state.globalRawData = [];
   const cache = {};
 
@@ -281,11 +366,13 @@ export function applyFilters() {
   if (ftm) ftm.value = ft;
 
   const fc = state.selectedCityTab;
-  const filtered = state.globalRawData.filter(i =>
-    i.monthStr === state.activeMonthYear &&
-    (fc === 'ALL' || i.cidade === fc) &&
-    (ft === 'ALL' || i.tipo === ft)
-  );
+  const monthRows = state.globalRawDataByMonth?.[state.activeMonthYear] || [];
+  const filtered = (fc === 'ALL' && ft === 'ALL')
+    ? monthRows
+    : monthRows.filter(i =>
+        (fc === 'ALL' || i.cidade === fc) &&
+        (ft === 'ALL' || i.tipo === ft)
+      );
 
   updateDashboardStats(filtered);
   buildOperationalAnalysis(filtered);
